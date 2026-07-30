@@ -24,17 +24,17 @@ Fatal Python error: Aborted
 
 ## 使用注意事项
 
-> **重要：当前 `requirements.txt` 中的 Windows wheel 仍是原始
-> `llama-cpp-python 0.3.40` 构建，并不包含本次 OpenMP 修复。**
-> 在安全 wheel 发布到 GitHub Releases 并更新下载地址之前，请按照
-> [Windows OpenMP-safe 构建指南](docs/windows-openmp.md)自行构建和安装。
+> **Python 3.13 / Windows x64：** `requirements.txt` 已指向实测通过的
+> `llama-cpp-python 0.3.44` OpenMP-safe CUDA wheel，可直接安装。
+> 其他 Python 次版本暂时仍使用上游 wheel；如果遇到 OpenMP 冲突，请按照
+> [Windows OpenMP-safe 构建指南](docs/windows-openmp.md)自行构建。
 
 - 不要使用 `KMP_DUPLICATE_LIB_OK=TRUE` 作为长期解决方案，并从 ComfyUI
   启动脚本及系统环境变量中移除它。
 - wheel 必须与 ComfyUI 使用相同的 Python 次版本匹配，例如 Python 3.13
-  必须安装 `cp313` wheel。
-- `-DCMAKE_CUDA_ARCHITECTURES=120` 面向 RTX 5090/Blackwell；其他显卡请按
-  对应 Compute Capability 重新构建。
+  必须安装 `cp313` wheel。发布流程会同时构建 Python 3.10–3.14。
+- 默认构建覆盖 CUDA 架构 `75;80;86;89;120`，对应常见 RTX
+  20/30/40/50 系显卡；也可以通过参数缩小目标架构以加快本地构建。
 - 安装 wheel 前请完全关闭 ComfyUI，然后使用 Portable 自带的
   `python_embeded\python.exe` 执行安装。
 - ComfyUI Manager 更新或重新安装依赖后，可能会把安全 wheel 覆盖为原始
@@ -71,18 +71,17 @@ Fatal Python error: Aborted
 
 ### Important notes
 
-> **The Windows wheels currently referenced by `requirements.txt` are still
-> the original `llama-cpp-python 0.3.40` builds and do not include this OpenMP
-> fix.** Until an OpenMP-safe wheel is published in GitHub Releases and the
-> download URL is updated, build and install one by following the
-> [Windows OpenMP-safe build guide](docs/windows-openmp.md).
+> **Python 3.13 / Windows x64:** `requirements.txt` now installs the tested
+> `llama-cpp-python 0.3.44` OpenMP-safe CUDA wheel directly. Other Python
+> versions temporarily retain the upstream wheels; build locally with the
+> [Windows OpenMP-safe build guide](docs/windows-openmp.md) if they conflict.
 
 - Do not use `KMP_DUPLICATE_LIB_OK=TRUE` as a permanent solution. Remove it
   from ComfyUI startup scripts and Windows environment variables.
 - The wheel must match ComfyUI's Python minor version. For example, Python
-  3.13 requires a `cp313` wheel.
-- `-DCMAKE_CUDA_ARCHITECTURES=120` targets RTX 5090/Blackwell. Rebuild with the
-  appropriate Compute Capability for other GPUs.
+  3.13 requires a `cp313` wheel. The release workflow builds Python 3.10–3.14.
+- The default build covers CUDA architectures `75;80;86;89;120` for common
+  RTX 20/30/40/50-series GPUs. The list can be narrowed for faster local builds.
 - Completely close ComfyUI before installing the wheel, and run pip through
   Portable's own `python_embeded\python.exe`.
 - ComfyUI Manager dependency updates may replace the safe wheel with the
@@ -100,12 +99,49 @@ Run LLM/VLM models natively in ComfyUI based on llama.cpp
 ## Preview  
 ![](./img/preview.jpg)
 
-## 安装方法（Windows / RTX 50 系）
+## Text to Image Prompt 节点
+
+该节点默认是透明的 LLM Prompt 调用节点，不会注入隐藏的分析、推理、规划、
+自检或思维链 Prompt。默认数据流为：
+
+```text
+System Prompt → User Prompt → llama.cpp → Prompt
+```
+
+- `Internal Prompt Engineering` 默认为 `Disabled`。只有用户主动开启时，节点
+  才加入简短且不要求推理过程的图像 Prompt 优化指令。
+- `Raw Mode` 开启时优先级最高：强制关闭内部增强，输入原样发送，模型内容
+  原样返回。
+- `Output Mode` 默认为 `Raw`。`Text` 只去除首尾空白，`JSON` 只验证输出是
+  有效 JSON；节点不会自动增加 Markdown、标题、编号或代码块。
+- `Language` 默认为 `Auto`，仅在内部增强开启时作为建议，不会触发隐藏的
+  英文分析。
+
+旧工作流中的 `Subject` 和 `Setting Words` 已替换为 `System Prompt` 和
+`User Prompt`，首次打开旧工作流时请重新填写这两个字段及新增选项。
+
+## 安装方法
+
+### 常规安装（Windows / Python 3.13）
+
+与普通 ComfyUI 节点相同，无需替换或升级 Python：
+
+```powershell
+$portable = "C:\path\to\ComfyUI_windows_portable"
+$python = Join-Path $portable "python_embeded\python.exe"
+
+Set-Location (Join-Path $portable "ComfyUI\custom_nodes")
+git clone https://github.com/yaocoler/ComfyUI-llama-cpp_vlmx.git
+& $python -m pip install -r .\ComfyUI-llama-cpp_vlmx\requirements.txt
+```
+
+完全关闭并重新启动 ComfyUI。请勿设置
+`KMP_DUPLICATE_LIB_OK=TRUE`。
+
+### 从源码构建安全 wheel
 
 以下方法会从本仓库安装节点，并在本机编译不携带 LLVM OpenMP Runtime 的
-`llama-cpp-python` CUDA wheel。请不要在 Windows 上直接执行原来的
-`pip install -r requirements.txt`，其中引用的旧 Windows wheel 尚未包含
-OpenMP 修复。
+`llama-cpp-python` CUDA wheel，适合其他 Python 或 GPU 环境。
 
 ### 1. 克隆本仓库
 
@@ -132,7 +168,7 @@ CMake，以及支持目标显卡的 CUDA Toolkit。RTX 5090 / CUDA 12.8 示例�
 ```powershell
 .\tools\build_windows_openmp_safe.ps1 `
   -PythonExe $python `
-  -CudaArchitectures 120
+  -CudaArchitectures "75;80;86;89;120"
 ```
 
 脚本会自动应用源码补丁，以 `GGML_OPENMP=OFF` 构建，并拒绝任何仍携带或
@@ -162,12 +198,30 @@ $wheel = Get-ChildItem .\dist\llama_cpp_python-*.whl |
 更完整的编译和验收说明参见
 [Windows OpenMP-safe 构建指南](docs/windows-openmp.md)。
 
-## Installation (Windows / RTX 50 series)
+## Installation
+
+### Standard install (Windows / Python 3.13)
+
+Install it like a normal ComfyUI custom node; do not replace or upgrade
+ComfyUI's Python:
+
+```powershell
+$portable = "C:\path\to\ComfyUI_windows_portable"
+$python = Join-Path $portable "python_embeded\python.exe"
+
+Set-Location (Join-Path $portable "ComfyUI\custom_nodes")
+git clone https://github.com/yaocoler/ComfyUI-llama-cpp_vlmx.git
+& $python -m pip install -r .\ComfyUI-llama-cpp_vlmx\requirements.txt
+```
+
+Completely stop and restart ComfyUI. Do not set
+`KMP_DUPLICATE_LIB_OK=TRUE`.
+
+### Build a safe wheel from source
 
 This method installs the node from this repository and locally builds a CUDA
-`llama-cpp-python` wheel without the LLVM OpenMP runtime. Do not use the old
-`pip install -r requirements.txt` command on Windows yet: its referenced
-Windows wheels do not contain this OpenMP fix.
+`llama-cpp-python` wheel without the LLVM OpenMP runtime for other Python or
+GPU environments.
 
 ### 1. Clone this repository
 
@@ -194,7 +248,7 @@ a CUDA Toolkit supporting the target GPU first. For RTX 5090 with CUDA 12.8:
 ```powershell
 .\tools\build_windows_openmp_safe.ps1 `
   -PythonExe $python `
-  -CudaArchitectures 120
+  -CudaArchitectures "75;80;86;89;120"
 ```
 
 The script applies the source patch, builds with `GGML_OPENMP=OFF`, and rejects
