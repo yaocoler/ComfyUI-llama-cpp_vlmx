@@ -21,6 +21,11 @@ Fatal Python error: Aborted
   `libomp140.x86_64.dll`，同时存在时输出明确警告。
 - 同时兼容新版 `mmproj_path` 和旧版 `clip_model_path`，修复 mmproj
   已成功加载却被误判为未配置的问题。
+- 修复混合架构模型（如 Qwen3.5/3.6，以及其他被 llama-cpp-python 判定为
+  `is_hybrid` 的模型）在收到与上一次完全相同的 Prompt 时，因复用生成末尾的
+  陈旧 logits 而静默返回空字符串的问题。`Llama-cpp Instruct` 与
+  `Text to Image Prompt` 节点现在共用同一套生成后缓存重置逻辑
+  （`LLAMA_CPP_STORAGE.reset_hybrid_cache()`），不再只对 Qwen3.5 生效。
 
 ## 使用注意事项
 
@@ -68,6 +73,13 @@ Fatal Python error: Aborted
 - Added compatibility for both the new `mmproj_path` property and the legacy
   `clip_model_path` property, preventing a successfully loaded mmproj from
   being reported as missing.
+- Fixed hybrid-architecture models (e.g. Qwen3.5/3.6, or any model
+  llama-cpp-python flags as `is_hybrid`) silently returning an empty string
+  when queried again with an identical prompt, caused by reusing stale
+  end-of-generation logits. `Llama-cpp Instruct` and `Text to Image Prompt`
+  now share the same post-generation cache reset
+  (`LLAMA_CPP_STORAGE.reset_hybrid_cache()`) instead of it being limited to
+  Qwen3.5.
 
 ### Important notes
 
