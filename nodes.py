@@ -148,21 +148,31 @@ class LLAMA_CPP_STORAGE:
             cls.llm.close()
         except Exception:
             pass
-            
+
         try:
             cls.chat_handler._exit_stack.close()
         except Exception:
             pass
-        
+
         cls.llm = None
         cls.chat_handler = None
         cls.current_config = None
         if all:
             cls.clean_state()
-        
+
         gc.collect()
         mm.soft_empty_cache()
-    
+
+    @classmethod
+    def reset_hybrid_cache(cls):
+        # Hybrid/recurrent/SWA models can otherwise reuse stale end-of-generation
+        # logits on the next identical-prompt call and emit an immediate EOS.
+        if getattr(cls.llm, "is_hybrid", False):
+            cls.llm.n_tokens = 0
+            cls.llm._ctx.memory_clear(True)
+            if cls.llm._hybrid_cache_mgr is not None:
+                cls.llm._hybrid_cache_mgr.clear()
+
     @classmethod
     def load_model(cls, config):
         def get_chat_handler(chat_handler):
@@ -252,7 +262,9 @@ class LLAMA_CPP_STORAGE:
                 kwargs["force_reasoning"] = think_mode
                 kwargs["image_max_tokens"] = image_max_tokens
                 kwargs["image_min_tokens"] = image_min_tokens
-            elif chat_handler in ["MiniCPM-v4.5", "GLM-4.6V", "Qwen3.5"]:
+            elif chat_handler.removesuffix("-Thinking") in [
+                "Qwen3.5", "Qwen3.6", "MiniCPM-v4.5", "MiniCPM-v4.6", "GLM-4.6V", "GLM-4.1V",
+            ]:
                 kwargs["enable_thinking"] = think_mode
 
             if _MTMD:
@@ -506,7 +518,7 @@ class llama_cpp_instruct_adv:
         return clean_messages
     
     def process(self, llama_model, preset_prompt, custom_prompt, system_prompt, inference_mode, max_frames, max_size, seed, force_offload, save_states, unique_id, parameters=None, images=None, queue_handler=None):
-        if not LLAMA_CPP_STORAGE.llm:
+        if not LLAMA_CPP_STORAGE.llm or LLAMA_CPP_STORAGE.current_config != llama_model:
             LLAMA_CPP_STORAGE.load_model(llama_model)
             #raise RuntimeError("The model has been unloaded or failed to load!")
         
@@ -624,38 +636,60 @@ class llama_cpp_instruct_adv:
         if force_offload:
             LLAMA_CPP_STORAGE.clean()
         else:
-            if LLAMA_CPP_STORAGE.current_config["chat_handler"] in ["Qwen3.5", "Qwen3.5-Thinking"]:
-                LLAMA_CPP_STORAGE.llm.n_tokens = 0
-                LLAMA_CPP_STORAGE.llm._ctx.memory_clear(True)
-                if LLAMA_CPP_STORAGE.llm.is_hybrid and LLAMA_CPP_STORAGE.llm._hybrid_cache_mgr is not None:
-                    LLAMA_CPP_STORAGE.llm._hybrid_cache_mgr.clear()
+            LLAMA_CPP_STORAGE.reset_hybrid_cache()
             
         del messages
         gc.collect()
         return (out1, out2, uid)
 
 class llama_cpp_text_to_image_prompt:
-    """Expand a short subject into a prompt suitable for text-to-image models."""
+    """Send transparent system/user messages to the loaded LLM."""
 
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
                 "llama_model": ("LLAMACPPMODEL",),
-                "subject": ("STRING", {
+                "system_prompt": ("STRING", {
                     "default": "",
-                    "multiline": False,
-                    "placeholder": "输入一个词语或词组，例如：雨夜里的白猫",
-                    "tooltip": "要扩写的主体词语或词组。",
-                }),
-                "setting_words": ("STRING", {
-                    "default": "电影感，细节丰富，自然光影",
                     "multiline": True,
-                    "placeholder": "风格、场景、构图、光线等设定词",
-                    "tooltip": "用于约束画面风格、场景、构图、光线等；可以留空。",
+                    "placeholder": "例如：你是一名 AI 绘图 Prompt 专家。只输出最终 Prompt。",
+                    "tooltip": "直接作为 system 消息发送；节点不会自动包装或改写。",
                 }),
-                "language": (["中文", "English"], {"default": "中文"}),
-                "detail_level": (["简洁", "详细", "极致详细"], {"default": "详细"}),
+                "user_prompt": ("STRING", {
+                    "default": "",
+                    "multiline": True,
+                    "placeholder": "例如：苹果",
+                    "tooltip": "直接作为 user 消息发送；节点不会自动包装或改写。",
+                }),
+                "internal_prompt_engineering": (
+                    ["Disabled", "Enabled"],
+                    {
+                        "default": "Disabled",
+                        "tooltip": "默认关闭。开启后才允许节点加入可选的 Prompt 优化指令。",
+                    },
+                ),
+                "raw_mode": (
+                    ["Disabled", "Enabled"],
+                    {
+                        "default": "Disabled",
+                        "tooltip": "开启后强制禁用内部增强，并原样发送输入、原样返回模型内容。",
+                    },
+                ),
+                "output_mode": (
+                    ["Raw", "Text", "JSON", "Markdown"],
+                    {
+                        "default": "Raw",
+                        "tooltip": "Raw 原样返回；JSON 只验证模型输出，不重排或包装内容。",
+                    },
+                ),
+                "language": (
+                    ["Auto", "Chinese", "English", "Japanese"],
+                    {
+                        "default": "Auto",
+                        "tooltip": "仅在 Internal Prompt Engineering 开启时作为输出语言建议。",
+                    },
+                ),
                 "seed": ("INT", {
                     "default": 0,
                     "min": 0,
@@ -669,36 +703,55 @@ class llama_cpp_text_to_image_prompt:
         }
 
     RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("image_prompt",)
+    RETURN_NAMES = ("prompt",)
     FUNCTION = "generate"
     CATEGORY = "llama-cpp-vlm"
 
-    def generate(self, llama_model, subject, setting_words, language, detail_level, seed, parameters=None):
-        subject = subject.strip()
-        if not subject:
-            raise ValueError('"subject" cannot be empty.')
-        if not LLAMA_CPP_STORAGE.llm:
+    def generate(
+        self,
+        llama_model,
+        system_prompt,
+        user_prompt,
+        internal_prompt_engineering,
+        raw_mode,
+        output_mode,
+        language,
+        seed,
+        parameters=None,
+    ):
+        if not LLAMA_CPP_STORAGE.llm or LLAMA_CPP_STORAGE.current_config != llama_model:
             LLAMA_CPP_STORAGE.load_model(llama_model)
 
-        length_instructions = {
-            "简洁": "Use one concise sentence.",
-            "详细": "Use one cohesive paragraph with rich, concrete visual details.",
-            "极致详细": "Use one highly detailed paragraph covering subject, environment, composition, lighting, color, texture, mood, and camera perspective.",
-        }
-        output_language = "Chinese" if language == "中文" else "English"
-        system_prompt = (
-            "You are a professional prompt writer for text-to-image generation. "
-            "Turn the user's short subject into a vivid, directly usable image prompt. "
-            "Preserve the subject's meaning and incorporate the supplied setting words naturally. "
-            "Describe only visible image content; do not explain your work, add headings, quotes, "
-            "markdown, negative prompts, or conversational text. "
-            f"Write only the final prompt in {output_language}. "
-            f"{length_instructions[detail_level]}"
+        use_internal_prompt = (
+            internal_prompt_engineering == "Enabled" and raw_mode != "Enabled"
         )
-        settings = setting_words.strip() or "(none)"
+        effective_system_prompt = system_prompt
+        if use_internal_prompt:
+            enhancement_instructions = [
+                "Improve the user input into a directly usable image-generation prompt.",
+                "Preserve the user's intent and output only the final prompt.",
+                "Do not include explanations, intermediate work, headings, or commentary.",
+            ]
+            if language != "Auto":
+                enhancement_instructions.append(
+                    f"Use {language} for the final response when appropriate."
+                )
+            if output_mode == "JSON":
+                enhancement_instructions.append("Return valid JSON without a code fence.")
+            elif output_mode == "Markdown":
+                enhancement_instructions.append("Return Markdown.")
+            elif output_mode == "Text":
+                enhancement_instructions.append("Return plain text.")
+            internal_prompt = " ".join(enhancement_instructions)
+            effective_system_prompt = (
+                f"{system_prompt}\n\n{internal_prompt}"
+                if system_prompt
+                else internal_prompt
+            )
+
         messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Subject: {subject}\nSetting words: {settings}"},
+            {"role": "system", "content": effective_system_prompt},
+            {"role": "user", "content": user_prompt},
         ]
         generation_parameters = {
             "max_tokens": 512,
@@ -714,8 +767,12 @@ class llama_cpp_text_to_image_prompt:
         output = LLAMA_CPP_STORAGE.llm.create_chat_completion(
             messages=messages, seed=seed, **generation_parameters
         )
-        prompt = output["choices"][0]["message"]["content"].strip()
-        prompt = prompt.removeprefix("```text").removeprefix("```").removesuffix("```").strip()
+        LLAMA_CPP_STORAGE.reset_hybrid_cache()
+        prompt = output["choices"][0]["message"]["content"]
+        if raw_mode != "Enabled" and output_mode == "Text":
+            prompt = prompt.strip()
+        elif raw_mode != "Enabled" and output_mode == "JSON":
+            json.loads(prompt)
         return (prompt,)
 
 class llama_cpp_parameters:
